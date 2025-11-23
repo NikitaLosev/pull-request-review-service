@@ -1,0 +1,100 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: review_service_api
+    env_file:
+      - .env
+    ports:
+      # Порт согласно конфигурации (по умолчанию 8080)
+      - "${APP_PORT:-8080}:${APP_PORT:-8080}"
+    environment:
+      # Строка подключения к БД внутри сети Docker
+      DB_DSN: ${DB_DSN}
+      APP_PORT: ${APP_PORT:-8080}
+    depends_on:
+      # Ждем доступности БД И успешного завершения миграций
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  db:
+    image: postgres:15-alpine
+    container_name: review_service_db
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    # Healthcheck гарантирует, что БД готова принимать соединения
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Отдельный сервис для запуска миграций.
+  migrate:
+    image: migrate/migrate:v4.17.1
+    container_name: review_service_migrate
+    env_file:
+      - .env
+    volumes:
+      # Монтируем локальную папку с миграциями в контейнер
+      - ./migrations:/migrations
+    command: [
+      "-path", "/migrations",
+      "-database", "${DB_DSN}",
+      "up"
+    ]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no" # Запускается только один раз
+
+  docs:
+    image: swaggerapi/swagger-ui
+    container_name: review_service_docs
+    env_file:
+      - .env
+    ports:
+      - "${DOCS_PORT:-8081}:8080"
+    volumes:
+      - ./openapi.yml:/openapi.yml:ro
+    environment:
+      SWAGGER_JSON: /openapi.yml
+    depends_on:
+      - api
+
+  prometheus:
+    image: prom/prometheus
+    container_name: review_service_prometheus
+    env_file:
+      - .env
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    ports:
+      - "${PROM_PORT:-9090}:9090"
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana
+    container_name: review_service_grafana
+    env_file:
+      - .env
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  pg_data:
